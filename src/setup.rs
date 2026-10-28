@@ -113,6 +113,28 @@ pub fn env(args: &Args) -> Result<()> {
     Ok(())
 }
 
+pub fn close(args: &Args) -> Result<()> {
+    // root side
+    cmd("ip", &["link", "delete", "dev", &args.root_tun])?;
+
+    // ns side
+    cmd(
+        "ip",
+        &[
+            "netns",
+            "exec",
+            &args.ns,
+            "ip",
+            "link",
+            "delete",
+            "dev",
+            &args.ns_tun,
+        ],
+    )?;
+
+    Ok(())
+}
+
 fn cmd(program: &str, args: &[&str]) -> Result<()> {
     let out = std::process::Command::new(program)
         .args(args)

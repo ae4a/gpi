@@ -31,6 +31,8 @@ fn main() -> Result<()> {
     t1.join().unwrap()?;
     t2.join().unwrap()?;
 
+    setup::close(&args)?;
+
     Ok(())
 }
 
@@ -44,5 +46,6 @@ fn forward(src: Arc<SyncDevice>, dst: Arc<SyncDevice>) -> Result<()> {
         }
 
         dst.send(&buf[..n])?;
+        println!("forwarded {n}")
     }
 }
