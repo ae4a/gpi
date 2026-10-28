@@ -1,5 +1,7 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use clap::Parser;
+use std::sync::Arc;
+use std::thread;
 use tun_rs::{DeviceBuilder, SyncDevice};
 
 #[derive(Parser, Debug)]
@@ -24,11 +26,31 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let (name1, ip1) = (args.name1.clone(), args.ip1.clone());
-    let _dev1 = in_netns(&args.ns1, move || make_tun(&name1, &ip1));
+    let dev1 = Arc::new(in_netns(&args.ns1, move || make_tun(&name1, &ip1))?);
     let (name2, ip2) = (args.name1.clone(), args.ip1.clone());
-    let _dev2 = in_netns(&args.ns1, move || make_tun(&name2, &ip2));
+    let dev2 = Arc::new(in_netns(&args.ns1, move || make_tun(&name2, &ip2))?);
+
+    let (dev1_c, dev2_c) = (dev1.clone(), dev2.clone());
+    let t1 = thread::spawn(move || forward(dev1_c, dev2_c));
+    let t2 = thread::spawn(move || forward(dev2, dev1));
+
+    t1.join().unwrap()?;
+    t2.join().unwrap()?;
 
     Ok(())
+}
+
+fn forward(src: Arc<SyncDevice>, dst: Arc<SyncDevice>) -> Result<()> {
+    let mut buf = [0u8; 2048];
+
+    loop {
+        let n = src.recv(&mut buf)?;
+        if n == 0 {
+            break Ok(());
+        }
+
+        dst.send(&buf[..n])?;
+    }
 }
 
 fn make_tun(name: &str, ip: &str) -> Result<SyncDevice> {
@@ -45,7 +67,7 @@ where
     F: FnOnce() -> Result<T> + Send + 'static,
 {
     let path = format!("/var/run/netns/{ns}");
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         let nsf = std::fs::File::open(path)?;
         nix::sched::setns(&nsf, nix::sched::CloneFlags::CLONE_NEWNS)?;
         f()
