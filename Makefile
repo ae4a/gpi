@@ -1,2 +1,2 @@
 run:
-	cargo run --target aarch64-unknown-linux-musl
+	cargo build --target aarch64-unknown-linux-musl
