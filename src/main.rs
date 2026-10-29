@@ -15,16 +15,16 @@ fn main() -> Result<()> {
     setup::env(&args)?;
     println!("env set up");
 
-    let dev1 = Arc::new(setup::tun(&args.root_tun)?);
+    let root_tun = Arc::new(setup::tun(&args.root_tun)?);
     println!("root ns tun created");
 
     let ns_tun = args.ns_tun.clone();
-    let dev2 = Arc::new(setup::in_netns(&args.ns, move || setup::tun(&ns_tun))?);
+    let ns_tun = Arc::new(setup::in_netns(&args.ns, move || setup::tun(&ns_tun))?);
     println!("ns tun created");
 
-    let (dev1_c, dev2_c) = (dev1.clone(), dev2.clone());
-    let t1 = thread::spawn(move || Forwarder::new(dev1_c, dev2_c).forward());
-    let t2 = thread::spawn(move || Forwarder::new(dev2, dev1).forward_with_analize());
+    let (root_tun_c, ns_tun_c) = (root_tun.clone(), ns_tun.clone());
+    let t1 = thread::spawn(move || Forwarder::new(root_tun_c, ns_tun_c).forward());
+    let t2 = thread::spawn(move || Forwarder::new(ns_tun, root_tun).forward_with_analize());
 
     println!("starting forwarding...");
 
