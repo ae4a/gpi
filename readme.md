@@ -1,28 +1,20 @@
+# Glubokaya Paketnaya Inspektsiya
+Simple DPI between two namespaces:
+- root: tun1 10.0.0.1/24
+- ns2: tun2 10.0.0.2/24
+
 # Setting up namespaces
-it will be 
-- root tun1 10.0.0.1/24
-- ns2 tun2 10.0.0.2/24
+`sudo ip netns add ns2`
+the rest will be done by `gpi`
 
+# Some multipass lifehacks (macos)
+## Fix multipass inet access(with vpn)
+- find your vpn interface in `ifconfig` something like `utun5` ask ai
+- find your multipass interface ip - something like `bridge0` or `bridge100`
+- enable ip forwarding `sudo sysctl -w net.inet.ip.forwarding=1`
+- add rule to send data to it from mp `echo "nat on <VPN_IF> from <MP_IP>/24 to any -> (<VPN_IF>)" | sudo pfctl -ef -`
+- check that it is there `sudo pfctl -sn`
+- restart mp `sudo launchctl kickstart -k system/com.canonical.multipassd`
+- ready
 
-
-ip tuntap add dev tun0 mode tun
-ip addr add 10.0.0.1/24 dev tun0
-ip link set tun0 mtu 1600 up
-sysctl -w net.ipv4.ip_forward=1
-iptables -t nat -A POSTROUTING -o <eth> -j MASQUERADE
-
-ip netns exec ns2 ip tuntap add dev tun2 mode tun
-ip netns exec ns2 ip addr add 10.0.0.2/24 dev tun2
-ip netns exec ns2 ip link set tun2 mtu 1400 up
-ip netns exec ns2 ip route add default dev tun2
-
-mkdir -p /etc/netns/ns2
-echo "nameserver 1.1.1.1" | tee /etc/netns/ns2/resolv.conf
-
-
-# Fix multipass inet access(with vpn)
-
-echo "nat on utun5 from 192.168.64.0/24 to any -> (utun5)" | sudo pfctl -ef -
-
-or 
-echo "nat on en0 from 192.168.64.0/24 to any -> (en0)" | sudo pfctl -ef -
+- reset it: `sudo pfctl -F nat`
