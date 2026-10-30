@@ -104,7 +104,7 @@ fn forward_and_filter(
         log_pkt(&buf[..n], label);
 
         if let Err(err) = f.filter(&buf[..n]) {
-            println!("Packet droped: {err}");
+            println!("Packet droped: {err:#}");
             continue;
         }
 

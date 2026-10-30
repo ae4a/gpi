@@ -36,7 +36,7 @@ impl SimplePktFilter {
         let pkt = &pkt[UDP_HEADER_SIZE..];
 
         if dst_port == 53 && pkt.len() >= 12 {
-            self.filter_dns(pkt).with_context(|| "DNS: ")?;
+            self.filter_dns(pkt).with_context(|| "DNS")?;
         }
         Ok(())
     }
@@ -61,8 +61,6 @@ impl SimplePktFilter {
     fn try_get_dns(&self, pkt: &[u8]) -> Option<String> {
         let mut name = String::new();
         let mut i = 0;
-
-        println!("{}", String::from_utf8_lossy(pkt));
 
         loop {
             let n = usize::from(*pkt.get(i)?);
