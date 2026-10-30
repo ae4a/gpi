@@ -31,13 +31,13 @@ fn main() -> Result<()> {
     let ns_tun = Arc::new(setup::in_netns(&args.ns, move || setup::tun(&ns_tun))?);
     println!("ns tun created");
 
+    let filter = Arc::new(SimplePktFilter::new());
+
     let (root_tun_c, ns_tun_c) = (root_tun.clone(), ns_tun.clone());
     let rc = running.clone();
     let t1 = thread::spawn(move || forward(rc, root_tun_c, ns_tun_c, "root->ns"));
     let rc = running.clone();
-    let t2 = thread::spawn(move || {
-        forward_and_filter(rc, ns_tun, root_tun, SimplePktFilter::new(), "ns->root")
-    });
+    let t2 = thread::spawn(move || forward_and_filter(rc, ns_tun, root_tun, filter, "ns->root"));
 
     println!("starting forwarding...");
 
@@ -73,7 +73,7 @@ fn forward_and_filter(
     r: Arc<AtomicBool>,
     src: Arc<SyncDevice>,
     dst: Arc<SyncDevice>,
-    mut f: impl PktFilter,
+    f: Arc<impl PktFilter>,
     label: &str,
 ) -> Result<()> {
     let mut buf = [0u8; 2048];
@@ -107,6 +107,7 @@ fn log_pkt(pkt: &[u8], label: &str) {
             let len = u16::from_be_bytes([pkt[2], pkt[3]]);
             let src_ip = format!("{}.{}.{}.{}", pkt[12], pkt[13], pkt[14], pkt[15]);
             let dst_ip = format!("{}.{}.{}.{}", pkt[16], pkt[17], pkt[18], pkt[19]);
+            let proto = pkt[9];
             println!("{label} --- IpV4 {}->{} ({len})", src_ip, dst_ip);
         }
         6 => {
