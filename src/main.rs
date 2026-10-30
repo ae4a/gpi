@@ -1,18 +1,27 @@
 use anyhow::Result;
 use clap::Parser;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::thread;
+use tun_rs::SyncDevice;
 
 mod args;
-mod forwarder;
+mod pkt_filter;
 mod setup;
 
-use forwarder::Forwarder;
+use pkt_filter::{PktFilter, SimplePktFilter};
 
 fn main() -> Result<()> {
+    let running = Arc::new(AtomicBool::new(true));
     let args = args::Args::parse();
+    let _env = setup::EnvSetup::env(&args)?;
 
-    setup::env(&args)?;
+    let rc = running.clone();
+    ctrlc::set_handler(move || {
+        println!("Cleaning");
+        rc.store(false, std::sync::atomic::Ordering::SeqCst);
+    })
+    .expect("Failed to clean up");
+
     println!("env set up");
 
     let root_tun = Arc::new(setup::tun(&args.root_tun)?);
@@ -23,15 +32,88 @@ fn main() -> Result<()> {
     println!("ns tun created");
 
     let (root_tun_c, ns_tun_c) = (root_tun.clone(), ns_tun.clone());
-    let t1 = thread::spawn(move || Forwarder::new(root_tun_c, ns_tun_c).forward());
-    let t2 = thread::spawn(move || Forwarder::new(ns_tun, root_tun).forward_with_analize());
+    let rc = running.clone();
+    let t1 = thread::spawn(move || forward(rc, root_tun_c, ns_tun_c, "root->ns"));
+    let rc = running.clone();
+    let t2 = thread::spawn(move || {
+        forward_and_filter(rc, ns_tun, root_tun, SimplePktFilter::new(), "ns->root")
+    });
 
     println!("starting forwarding...");
 
     t1.join().unwrap()?;
     t2.join().unwrap()?;
 
-    setup::close(&args)?;
+    Ok(())
+}
+
+fn forward(
+    r: Arc<AtomicBool>,
+    src: Arc<SyncDevice>,
+    dst: Arc<SyncDevice>,
+    label: &str,
+) -> Result<()> {
+    let mut buf = [0u8; 2048];
+
+    while r.load(std::sync::atomic::Ordering::SeqCst) {
+        let n = src.recv(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+
+        log_pkt(&buf[..n], label);
+
+        dst.send(&buf[..n])?;
+    }
 
     Ok(())
+}
+
+fn forward_and_filter(
+    r: Arc<AtomicBool>,
+    src: Arc<SyncDevice>,
+    dst: Arc<SyncDevice>,
+    mut f: impl PktFilter,
+    label: &str,
+) -> Result<()> {
+    let mut buf = [0u8; 2048];
+
+    while r.load(std::sync::atomic::Ordering::SeqCst) {
+        let n = src.recv(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+
+        log_pkt(&buf[..n], label);
+
+        if let Err(err) = f.filter(&buf[..n]) {
+            println!("Packet droped: {err}");
+            continue;
+        }
+
+        dst.send(&buf[..n])?;
+    }
+
+    Ok(())
+}
+
+fn log_pkt(pkt: &[u8], label: &str) {
+    if pkt.len() < 4 {
+        return;
+    }
+
+    match pkt[0] >> 4 {
+        4 if pkt.len() >= 20 => {
+            let len = u16::from_be_bytes([pkt[2], pkt[3]]);
+            let src_ip = format!("{}.{}.{}.{}", pkt[12], pkt[13], pkt[14], pkt[15]);
+            let dst_ip = format!("{}.{}.{}.{}", pkt[16], pkt[17], pkt[18], pkt[19]);
+            println!("{label} --- IpV4 {}->{} ({len})", src_ip, dst_ip);
+        }
+        6 => {
+            // println!("IpV6 is not yet supported for analize");
+        }
+        ver => {
+            println!("{label} --- unknown ip packet version: {ver}")
+        }
+    }
 }

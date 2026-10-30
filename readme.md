@@ -18,3 +18,11 @@ ip netns exec ns2 ip route add default dev tun2
 
 mkdir -p /etc/netns/ns2
 echo "nameserver 1.1.1.1" | tee /etc/netns/ns2/resolv.conf
+
+
+# Fix multipass inet access(with vpn)
+
+echo "nat on utun5 from 192.168.64.0/24 to any -> (utun5)" | sudo pfctl -ef -
+
+or 
+echo "nat on en0 from 192.168.64.0/24 to any -> (en0)" | sudo pfctl -ef -
