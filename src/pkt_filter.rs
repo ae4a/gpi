@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Mutex};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 const IP_HEADER_MIN_SIZE: usize = 20;
 const UDP_HEADER_SIZE: usize = 8;
@@ -10,45 +10,48 @@ pub trait PktFilter {
     fn filter(&self, pkt: &[u8]) -> Result<()>;
 }
 
-enum ConnState {
-    TcpSyn,
-    TcpSynAck,
-    TcpAck,
-}
+// enum ConnState {
+//     TcpSyn,
+//     TcpSynAck,
+//     TcpAck,
+// }
 
 pub struct SimplePktFilter {
-    state: Mutex<HashMap<String, ConnState>>,
+    // state: Mutex<HashMap<String, ConnState>>,
+    traiters: Vec<String>,
 }
 
 impl SimplePktFilter {
     pub fn new() -> impl PktFilter {
         SimplePktFilter {
-            state: Mutex::new(HashMap::new()),
+            // state: Mutex::new(HashMap::new()),
+            traiters: Vec::from(["youtube".to_string()]),
         }
     }
 
     fn filter_udp(&self, pkt: &[u8]) -> Result<()> {
-        println!("udp");
+        // println!("udp");
         let dst_port = u16::from_be_bytes([pkt[2], pkt[3]]);
 
         let pkt = &pkt[UDP_HEADER_SIZE..];
 
         if dst_port == 53 && pkt.len() >= 12 {
-            self.filter_dns(pkt)?;
+            self.filter_dns(pkt).with_context(|| "DNS: ")?;
         }
         Ok(())
     }
 
     fn filter_dns(&self, pkt: &[u8]) -> Result<()> {
-        println!("dns");
         // Check QR bit: 0 - request, 1 - response
         if pkt[2] & 0x80 != 0 {
             return Ok(());
         }
         if let Some(addr) = self.try_get_dns(&pkt[DNS_HEADER_SIZE..]) {
-            println!("{addr}");
-            if addr.contains("youtube") {
-                bail!("HIHIHI, block youtube");
+            // println!("{addr}");
+            for s in self.traiters.iter() {
+                if addr.contains(s) {
+                    bail!("found {s}");
+                }
             }
         }
 

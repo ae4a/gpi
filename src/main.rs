@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::thread;
-use tun_rs::SyncDevice;
+use tun_rs::{InterruptEvent, SyncDevice};
 
 mod args;
 mod pkt_filter;
@@ -15,12 +15,19 @@ fn main() -> Result<()> {
     let args = args::Args::parse();
     let _env = setup::EnvSetup::env(&args)?;
 
-    let rc = running.clone();
-    ctrlc::set_handler(move || {
-        println!("Cleaning");
-        rc.store(false, std::sync::atomic::Ordering::SeqCst);
-    })
-    .expect("Failed to clean up");
+    let event = Arc::new(InterruptEvent::new()?);
+
+    // CTRL-C handler
+    {
+        let running = running.clone();
+        let event = event.clone();
+        ctrlc::set_handler(move || {
+            println!("Cleaning");
+            running.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = event.trigger();
+        })
+        .expect("Failed to clean up");
+    }
 
     println!("env set up");
 
@@ -33,11 +40,19 @@ fn main() -> Result<()> {
 
     let filter = Arc::new(SimplePktFilter::new());
 
-    let (root_tun_c, ns_tun_c) = (root_tun.clone(), ns_tun.clone());
-    let rc = running.clone();
-    let t1 = thread::spawn(move || forward(rc, root_tun_c, ns_tun_c, "root->ns"));
-    let rc = running.clone();
-    let t2 = thread::spawn(move || forward_and_filter(rc, ns_tun, root_tun, filter, "ns->root"));
+    let t1 = {
+        let (root_tun, ns_tun) = (root_tun.clone(), ns_tun.clone());
+        let running = running.clone();
+        let event = event.clone();
+        thread::spawn(move || forward(running, event, root_tun, ns_tun, "root->ns"))
+    };
+    let t2 = {
+        let running = running.clone();
+        let event = event.clone();
+        thread::spawn(move || {
+            forward_and_filter(running, event, ns_tun, root_tun, filter, "ns->root")
+        })
+    };
 
     println!("starting forwarding...");
 
@@ -49,6 +64,7 @@ fn main() -> Result<()> {
 
 fn forward(
     r: Arc<AtomicBool>,
+    e: Arc<InterruptEvent>,
     src: Arc<SyncDevice>,
     dst: Arc<SyncDevice>,
     label: &str,
@@ -56,7 +72,7 @@ fn forward(
     let mut buf = [0u8; 2048];
 
     while r.load(std::sync::atomic::Ordering::SeqCst) {
-        let n = src.recv(&mut buf)?;
+        let n = src.recv_intr(&mut buf, &e)?;
         if n == 0 {
             return Ok(());
         }
@@ -71,6 +87,7 @@ fn forward(
 
 fn forward_and_filter(
     r: Arc<AtomicBool>,
+    e: Arc<InterruptEvent>,
     src: Arc<SyncDevice>,
     dst: Arc<SyncDevice>,
     f: Arc<impl PktFilter>,
@@ -79,7 +96,7 @@ fn forward_and_filter(
     let mut buf = [0u8; 2048];
 
     while r.load(std::sync::atomic::Ordering::SeqCst) {
-        let n = src.recv(&mut buf)?;
+        let n = src.recv_intr(&mut buf, &e)?;
         if n == 0 {
             return Ok(());
         }
