@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::{collections::HashMap, sync::Mutex};
 
 const IP_HEADER_MIN_SIZE: usize = 20;
@@ -12,7 +13,7 @@ pub trait PktFilter {
     fn filter(&self, pkt: &[u8]) -> Result<()>;
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum TcpState {
     Invalid,
     Empty,
@@ -22,7 +23,7 @@ enum TcpState {
     Data,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum TlsState {
     Invalid,
     Empty,
@@ -30,42 +31,94 @@ enum TlsState {
     Data,
 }
 
-#[derive(Clone)]
-struct ConnRecord {
+#[derive(Debug, Clone)]
+pub struct ConnRecord {
     i: usize,
     tcp: TcpState,
     tls: TlsState,
 }
 
+struct ConnId<'a> {
+    ips: (&'a [u8], &'a [u8]),
+    ports: Option<(&'a [u8], &'a [u8])>,
+}
+
+impl<'a> ConnId<'a> {
+    fn new(src: &'a [u8], dst: &'a [u8]) -> ConnId<'a> {
+        ConnId {
+            ips: (src, dst),
+            ports: None,
+        }
+    }
+
+    fn set_ports(&mut self, src: &'a [u8], dst: &'a [u8]) {
+        self.ports = Some((src, dst));
+    }
+
+    fn hash(self, reverse_dir: bool) -> Result<u64> {
+        let Some(ports) = self.ports else {
+            bail!("require ports for id");
+        };
+
+        let mut buf = [0u8; 12];
+
+        if reverse_dir {
+            buf[0..4].copy_from_slice(self.ips.1);
+            buf[4..8].copy_from_slice(self.ips.0);
+            buf[8..10].copy_from_slice(ports.1);
+            buf[10..12].copy_from_slice(ports.0);
+        } else {
+            buf[0..4].copy_from_slice(self.ips.0);
+            buf[4..8].copy_from_slice(self.ips.1);
+            buf[8..10].copy_from_slice(ports.0);
+            buf[10..12].copy_from_slice(ports.1);
+        }
+
+        let mut h = DefaultHasher::new();
+        buf.hash(&mut h);
+        Ok(h.finish())
+    }
+}
+
+pub type ConnRecordStore = Arc<Mutex<HashMap<u64, ConnRecord>>>;
+
+pub fn new_conn_store() -> ConnRecordStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 pub struct SimplePktFilter {
-    conns: Mutex<HashMap<u64, ConnRecord>>,
+    reverse_dir: bool, // In which direction packet is travaling - for id purpose
+    conns: ConnRecordStore,
     traiters: Vec<String>,
 }
 
 impl SimplePktFilter {
-    pub fn new() -> impl PktFilter {
+    pub fn new(reverse_dir: bool, conn_store: ConnRecordStore) -> impl PktFilter {
         SimplePktFilter {
-            conns: Mutex::new(HashMap::new()),
+            reverse_dir,
+            conns: conn_store,
             traiters: Vec::from(["youtube".to_string()]),
         }
     }
 
     fn filter_tls(&self, pkt: &[u8], conn: &mut ConnRecord) -> Result<()> {
+        println!("Got to tls!!");
         Ok(())
     }
 
-    fn filter_tcp(&self, pkt: &[u8], ips: &[u8]) -> Result<()> {
+    fn filter_tcp<'a>(&self, pkt: &'a [u8], mut id: ConnId<'a>) -> Result<()> {
+        println!("-----");
         let hlen = usize::from(pkt[12] & 0x0f);
         let ack = (pkt[13] & 0x02) == 1;
         let syn = (pkt[13] & 0x0f) == 1;
 
-        // Get connection id
-        let id = {
-            let mut ips = Vec::from(ips);
-            ips.append(&mut Vec::from(&pkt[..4]));
+        println!("{hlen} {ack} {syn}");
 
-            hash(&ips)
-        };
+        // Get connection id
+        id.set_ports(&pkt[0..2], &pkt[2..4]);
+        let id = id.hash(self.reverse_dir)?;
+
+        println!("id: {id}");
 
         // Get conn record
         let mut conns = self.conns.lock().map_err(|_| anyhow!("lock poisoned"))?;
@@ -87,6 +140,8 @@ impl SimplePktFilter {
             _ => TcpState::Invalid,
         };
 
+        println!("TCP conn({}): {:?}", self.reverse_dir, conn);
+
         // Send it to tls check there is payload
         if conn.tcp == TcpState::TcpSynAck || conn.tcp == TcpState::Data && pkt.len() - hlen > 0 {
             self.filter_tls(&pkt[hlen..], &mut conn)?;
@@ -94,6 +149,8 @@ impl SimplePktFilter {
 
         conn.i += 1;
         conns.insert(id, conn);
+
+        println!("-----");
         Ok(())
     }
 
@@ -176,6 +233,8 @@ impl PktFilter for SimplePktFilter {
                 // let dst_ip = format!("{}.{}.{}.{}", pkt[16], pkt[17], pkt[18], pkt[19]);
                 let proto = pkt[9];
 
+                let id = ConnId::new(&pkt[12..16], &pkt[16..20]);
+
                 let pkt = &pkt[header_len..];
                 match proto {
                     // UDP header 8 bytes
@@ -184,7 +243,7 @@ impl PktFilter for SimplePktFilter {
                     }
                     // TCP header 20 bytes
                     6 if pkt.len() >= TCP_HEADER_MIN_SIZE => {
-                        println!("tcp");
+                        return self.filter_tcp(pkt, id);
                     }
                     1 => {
                         println!("icmp");

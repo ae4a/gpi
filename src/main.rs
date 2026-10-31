@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use std::sync::Mutex;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::thread;
 use tun_rs::{InterruptEvent, SyncDevice};
@@ -38,19 +39,38 @@ fn main() -> Result<()> {
     let ns_tun = Arc::new(setup::in_netns(&args.ns, move || setup::tun(&ns_tun))?);
     println!("ns tun created");
 
-    let filter = Arc::new(SimplePktFilter::new());
+    let conn_store = pkt_filter::new_conn_store();
 
     let t1 = {
         let (root_tun, ns_tun) = (root_tun.clone(), ns_tun.clone());
         let running = running.clone();
         let event = event.clone();
-        thread::spawn(move || forward(running, event, root_tun, ns_tun, "root->ns"))
+        let conn_store = conn_store.clone();
+        thread::spawn(move || {
+            forward_and_filter(
+                running,
+                event,
+                root_tun,
+                ns_tun,
+                SimplePktFilter::new(true, conn_store),
+                "root->ns",
+            )
+        })
     };
     let t2 = {
         let running = running.clone();
         let event = event.clone();
+        let (root_tun, ns_tun) = (root_tun.clone(), ns_tun.clone());
+        let conn_store = conn_store.clone();
         thread::spawn(move || {
-            forward_and_filter(running, event, ns_tun, root_tun, filter, "ns->root")
+            forward_and_filter(
+                running,
+                event,
+                ns_tun,
+                root_tun,
+                SimplePktFilter::new(false, conn_store),
+                "ns->root",
+            )
         })
     };
 
@@ -90,7 +110,7 @@ fn forward_and_filter(
     e: Arc<InterruptEvent>,
     src: Arc<SyncDevice>,
     dst: Arc<SyncDevice>,
-    f: Arc<impl PktFilter>,
+    f: impl PktFilter,
     label: &str,
 ) -> Result<()> {
     let mut buf = [0u8; 2048];
