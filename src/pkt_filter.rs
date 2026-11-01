@@ -17,10 +17,14 @@ pub trait PktFilter {
 enum TcpState {
     Invalid,
     Empty,
-    TcpSyn,
-    TcpAck,
-    TcpSynAck,
+    Syn,
+    Ack,
+    SynAck,
     Data,
+    Fin1,
+    Fin1Ack,
+    Fin2,
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +37,7 @@ enum TlsState {
 
 #[derive(Debug, Clone)]
 pub struct ConnRecord {
+    id: u64,
     i: usize,
     tcp: TcpState,
     tls: TlsState,
@@ -108,23 +113,21 @@ impl SimplePktFilter {
 
     fn filter_tcp<'a>(&self, pkt: &'a [u8], mut id: ConnId<'a>) -> Result<()> {
         println!("-----");
-        let hlen = usize::from(pkt[12] & 0x0f);
-        let ack = (pkt[13] & 0x02) == 1;
-        let syn = (pkt[13] & 0x0f) == 1;
-
-        println!("{hlen} {ack} {syn}");
+        let hlen = usize::from(pkt[12] >> 4) * 4;
+        let ack = (pkt[13] & 0x10) != 0;
+        let syn = (pkt[13] & 0x02) != 0;
+        let fin = (pkt[13] & 0x01) != 0;
 
         // Get connection id
         id.set_ports(&pkt[0..2], &pkt[2..4]);
         let id = id.hash(self.reverse_dir)?;
-
-        println!("id: {id}");
 
         // Get conn record
         let mut conns = self.conns.lock().map_err(|_| anyhow!("lock poisoned"))?;
         let mut conn = match conns.get(&id) {
             Some(c) => c.clone(),
             None => ConnRecord {
+                id: id,
                 i: 0,
                 tcp: TcpState::Empty,
                 tls: TlsState::Empty,
@@ -133,23 +136,32 @@ impl SimplePktFilter {
 
         // Resolve tcp state
         conn.tcp = match conn.tcp {
-            TcpState::Empty if syn && !ack => TcpState::TcpSyn,
-            TcpState::TcpSyn if !syn && ack => TcpState::TcpAck,
-            TcpState::TcpAck if syn && ack => TcpState::TcpSynAck,
-            TcpState::TcpSynAck => TcpState::Data,
+            // Handshake
+            TcpState::Empty if syn && !ack => TcpState::Syn,
+            TcpState::Syn if syn && ack => TcpState::SynAck,
+            TcpState::SynAck if !syn && ack => TcpState::Ack,
+            TcpState::Ack if ack => TcpState::Data,
+            // Shutdown
+            TcpState::Data if fin && ack => TcpState::Fin1,
+            TcpState::Fin1 if fin && ack => TcpState::Fin2,
+            TcpState::Fin1 if ack => TcpState::Fin1Ack,
+            TcpState::Fin1Ack if fin && ack => TcpState::Fin2,
+            TcpState::Fin2 if ack => TcpState::Closed,
+
+            // Data transfer and invalid
+            TcpState::Data if ack => TcpState::Data,
             _ => TcpState::Invalid,
         };
 
-        println!("TCP conn({}): {:?}", self.reverse_dir, conn);
+        println!("TCP conn(dir: {}): {:?}", self.reverse_dir, conn);
 
         // Send it to tls check there is payload
-        if conn.tcp == TcpState::TcpSynAck || conn.tcp == TcpState::Data && pkt.len() - hlen > 0 {
+        if conn.tcp == TcpState::SynAck || conn.tcp == TcpState::Data && pkt.len() - hlen > 0 {
             self.filter_tls(&pkt[hlen..], &mut conn)?;
         }
 
         conn.i += 1;
         conns.insert(id, conn);
-
         println!("-----");
         Ok(())
     }
