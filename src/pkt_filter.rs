@@ -8,6 +8,8 @@ const IP_HEADER_MIN_SIZE: usize = 20;
 const UDP_HEADER_SIZE: usize = 8;
 const DNS_HEADER_SIZE: usize = 12;
 const TCP_HEADER_MIN_SIZE: usize = 20;
+const TLS_RECORD_HEADER_SIZE: usize = 5;
+const TLS_HANDSHAKE_MIN_SIZE: usize = 4;
 
 pub trait PktFilter {
     fn filter(&self, pkt: &[u8]) -> Result<()>;
@@ -27,20 +29,12 @@ enum TcpState {
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TlsState {
-    Invalid,
-    Empty,
-    HelloClient,
-    Data,
-}
-
 #[derive(Debug, Clone)]
 pub struct ConnRecord {
     id: u64,
-    i: usize,
+    i: usize, // Packet counter -  with data
     tcp: TcpState,
-    tls: TlsState,
+    tls: bool, // Is tls detected
 }
 
 struct ConnId<'a> {
@@ -106,8 +100,63 @@ impl SimplePktFilter {
         }
     }
 
-    fn filter_tls(&self, pkt: &[u8], conn: &mut ConnRecord) -> Result<()> {
-        println!("Got to tls!!");
+    fn filter_tls_handshake(&self, pkt: &[u8], conn: &mut ConnRecord) -> Result<()> {
+        if pkt.len() < TLS_HANDSHAKE_MIN_SIZE {
+            return Ok(());
+        }
+        let msg = pkt[0];
+        let len = u32::from_be_bytes([0, pkt[1], pkt[2], pkt[3]]);
+
+        Ok(())
+    }
+
+    fn filter_app(&self, pkt: &[u8], conn: &mut ConnRecord) -> Result<()> {
+        println!("APP...");
+        if conn.i == 0 {
+            println!("Looking for tls");
+            // Look for ClientHello
+            if pkt.len() < TLS_RECORD_HEADER_SIZE {
+                return Ok(());
+            }
+
+            let content_type = pkt[0];
+            let (v1, v2) = (pkt[1], pkt[2]);
+            let len = usize::from(u16::from_be_bytes([pkt[3], pkt[4]]));
+
+            if content_type == 0x16 && v1 == 0x03 && v2 <= 4 {
+                // Handshake
+                println!("TLS detected!!");
+                conn.tls = true;
+                println!("TLS Handshake Len: {len}");
+                self.filter_tls_handshake(
+                    &pkt[TLS_RECORD_HEADER_SIZE..TLS_RECORD_HEADER_SIZE + len],
+                    conn,
+                )?;
+            }
+            return Ok(());
+        }
+
+        if conn.tls {
+            if pkt.len() < TLS_RECORD_HEADER_SIZE {
+                return Ok(());
+            }
+
+            let content_type = pkt[0];
+            match content_type {
+                0x14 => println!("TLS change spypher"),
+                0x15 => println!("TLS alert"),
+                0x16 => println!("TLS handshake"),
+                0x17 => println!("TLS application data"),
+                _ => println!("TLS unknown"),
+            }
+        }
+
+        // if conn.i != 0 {
+        //     println!("Unencrypted data #{}", conn.i);
+        //     return Ok(());
+        // }
+
+        // println!("No ClientHello detected");
         Ok(())
     }
 
@@ -130,7 +179,7 @@ impl SimplePktFilter {
                 id: id,
                 i: 0,
                 tcp: TcpState::Empty,
-                tls: TlsState::Empty,
+                tls: false,
             },
         };
 
@@ -153,14 +202,15 @@ impl SimplePktFilter {
             _ => TcpState::Invalid,
         };
 
-        println!("TCP conn(dir: {}): {:?}", self.reverse_dir, conn);
+        // println!("TCP conn(dir: {}): {:?}", self.reverse_dir, conn);
 
         // Send it to tls check there is payload
-        if conn.tcp == TcpState::SynAck || conn.tcp == TcpState::Data && pkt.len() - hlen > 0 {
-            self.filter_tls(&pkt[hlen..], &mut conn)?;
+
+        if pkt.len() - hlen > 0 {
+            self.filter_app(&pkt[hlen..], &mut conn)?;
+            conn.i += 1;
         }
 
-        conn.i += 1;
         conns.insert(id, conn);
         println!("-----");
         Ok(())
