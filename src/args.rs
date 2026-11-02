@@ -8,7 +8,7 @@ pub struct Args {
     #[arg(long, default_value = "10.0.0.1")]
     pub root_ip: String,
 
-    #[arg(long)]
+    #[arg(long, default_value = "ns2")]
     pub ns: String,
     #[arg(long, default_value = "tun2")]
     pub ns_tun: String,
@@ -20,5 +20,11 @@ pub struct Args {
     #[arg(long, default_value = "1600")]
     pub mtu: u16,
     #[arg(long, default_value = "1.1.1.1")]
-    pub dns: String,
+    pub default_dns: String,
+
+    // Flags for filters
+    #[arg(long)]
+    pub dns: bool,
+    #[arg(long)]
+    pub sni: bool,
 }

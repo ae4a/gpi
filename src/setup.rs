@@ -114,7 +114,7 @@ impl EnvSetup {
         std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {dir}"))?;
         std::fs::write(
             format!("{dir}/resolv.conf"),
-            format!("nameserver {}\n", &args.dns),
+            format!("nameserver {}\n", &args.default_dns),
         )
         .context("write resolv.conf")?;
 

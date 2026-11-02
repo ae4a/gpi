@@ -85,19 +85,111 @@ pub fn new_conn_store() -> ConnRecordStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub dns: bool,
+    pub sni: bool,
+}
+
 pub struct SimplePktFilter {
-    reverse_dir: bool, // In which direction packet is travaling - for id purpose
+    pub reverse_dir: bool, // In which direction packet is travaling - for id purpose
+    cfg: Config,
+
     conns: ConnRecordStore,
     traiters: Vec<String>,
 }
 
 impl SimplePktFilter {
-    pub fn new(reverse_dir: bool, conn_store: ConnRecordStore) -> impl PktFilter {
+    pub fn new(cfg: Config, conn_store: ConnRecordStore, reverse_dir: bool) -> impl PktFilter {
         SimplePktFilter {
+            cfg,
             reverse_dir,
+
             conns: conn_store,
             traiters: Vec::from(["youtube".to_string()]),
         }
+    }
+
+    fn check_traiters(&self, suspect: &str) -> Result<()> {
+        for s in self.traiters.iter() {
+            if suspect.contains(s) {
+                bail!("found {s}");
+            }
+        }
+        Ok(())
+    }
+
+    fn filter_tls_handshake_clienthello(&self, pkt: &[u8], conn: &mut ConnRecord) -> Result<()> {
+        // Skip data until extensions
+        let mut i = 0usize; // Just for ease of use and uniformness
+
+        // Version + Random
+        i += 32 + 2;
+
+        // Skip session ID and its len
+        if i >= pkt.len() {
+            println!("tls clienthello is too short 1");
+            return Ok(());
+        }
+        let sid_len = usize::from(pkt[i]);
+        i += sid_len + 1;
+
+        // Skip sipher suites and their len
+        if i + 1 >= pkt.len() {
+            println!("tls clienthello is too short 2");
+            return Ok(());
+        }
+        let ss_len = usize::from(u16::from_be_bytes([pkt[i], pkt[i + 1]]));
+        i += ss_len + 2;
+
+        // Skip compression methods and their len
+        if i >= pkt.len() {
+            println!("tls clienthello is too short 3");
+            return Ok(());
+        }
+        let methods_len = usize::from(pkt[i]);
+        i += methods_len + 1;
+
+        // Read extensions len
+        if i >= pkt.len() {
+            println!("tls clienthello is too short 4");
+            return Ok(());
+        }
+        let ext_len = usize::from(u16::from_be_bytes([pkt[i], pkt[i + 1]]));
+        i += 2;
+        let end = (i + ext_len).min(pkt.len());
+
+        while i + 4 < end {
+            let t = usize::from(u16::from_be_bytes([pkt[i], pkt[i + 1]]));
+            let len = usize::from(u16::from_be_bytes([pkt[i + 2], pkt[i + 3]]));
+
+            println!("looking extension: {t}");
+
+            i += 4;
+
+            // server_name
+            if t == 0x0000 {
+                let pkt = &pkt[i..i + len];
+                if pkt.len() < 5 || pkt[2] != 0 {
+                    println!("unluck");
+                    return Ok(());
+                }
+                let n = usize::from(u16::from_be_bytes([pkt[3], pkt[4]]));
+                let name = &pkt[5..5 + n];
+                let Ok(host) = std::str::from_utf8(name) else {
+                    println!("Failed to prase str");
+                    return Ok(());
+                };
+                if self.cfg.sni {
+                    self.check_traiters(host)?;
+                }
+                println!("SNI HOST: {host}");
+            }
+
+            i += len;
+        }
+
+        Ok(())
     }
 
     fn filter_tls_handshake(&self, pkt: &[u8], conn: &mut ConnRecord) -> Result<()> {
@@ -105,7 +197,29 @@ impl SimplePktFilter {
             return Ok(());
         }
         let msg = pkt[0];
-        let len = u32::from_be_bytes([0, pkt[1], pkt[2], pkt[3]]);
+        let len = usize::from_be_bytes([0, 0, 0, 0, 0, pkt[1], pkt[2], pkt[3]]);
+
+        if len > pkt.len() - 4 {
+            println!("tls len is less then the package")
+        }
+
+        // Tmp
+        match msg {
+            0x01 => {
+                println!("ClientHello");
+                self.filter_tls_handshake_clienthello(&pkt[4..], conn)?;
+            }
+            0x02 => println!("ServerHello"),
+            0x04 => println!("SessionTicket"),
+            0x05 => println!("EndOfEarlyData"),
+            0x08 => println!("EncryptedExtensions"),
+            0x0b => println!("Certificate"),
+            0x0d => println!("CertificateRequest"),
+            0x0f => println!("CertificateVerify"),
+            0x14 => println!("Fnished"),
+            0x18 => println!("KeyUpdate"),
+            _ => (),
+        }
 
         Ok(())
     }
@@ -128,8 +242,15 @@ impl SimplePktFilter {
                 println!("TLS detected!!");
                 conn.tls = true;
                 println!("TLS Handshake Len: {len}");
+                if TLS_RECORD_HEADER_SIZE + len > pkt.len() {
+                    println!(
+                        "tls record {} is longer then pkt len {}",
+                        TLS_RECORD_HEADER_SIZE + len,
+                        pkt.len()
+                    );
+                }
                 self.filter_tls_handshake(
-                    &pkt[TLS_RECORD_HEADER_SIZE..TLS_RECORD_HEADER_SIZE + len],
+                    &pkt[TLS_RECORD_HEADER_SIZE..(TLS_RECORD_HEADER_SIZE + len).min(pkt.len())],
                     conn,
                 )?;
             }
@@ -234,12 +355,10 @@ impl SimplePktFilter {
             return Ok(());
         }
         if let Some(addr) = self.try_get_dns(&pkt[DNS_HEADER_SIZE..]) {
-            // println!("{addr}");
-            for s in self.traiters.iter() {
-                if addr.contains(s) {
-                    bail!("found {s}");
-                }
+            if self.cfg.dns {
+                self.check_traiters(&addr)?;
             }
+            println!("DNS: {addr}");
         }
 
         Ok(())

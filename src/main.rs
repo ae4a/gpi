@@ -3,6 +3,7 @@ use clap::Parser;
 use std::sync::Mutex;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::thread;
+use std::time::Duration;
 use tun_rs::{InterruptEvent, SyncDevice};
 
 mod args;
@@ -26,6 +27,12 @@ fn main() -> Result<()> {
             println!("Cleaning");
             running.store(false, std::sync::atomic::Ordering::SeqCst);
             let _ = event.trigger();
+
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(5));
+                eprintln!("shutdown timed out, forcing exit");
+                std::process::exit(1);
+            });
         })
         .expect("Failed to clean up");
     }
@@ -40,19 +47,25 @@ fn main() -> Result<()> {
     println!("ns tun created");
 
     let conn_store = pkt_filter::new_conn_store();
+    let cfg = pkt_filter::Config {
+        dns: args.dns,
+        sni: args.sni,
+    };
 
     let t1 = {
         let (root_tun, ns_tun) = (root_tun.clone(), ns_tun.clone());
         let running = running.clone();
         let event = event.clone();
         let conn_store = conn_store.clone();
+        let cfg = cfg.clone();
+
         thread::spawn(move || {
             forward_and_filter(
                 running,
                 event,
                 root_tun,
                 ns_tun,
-                SimplePktFilter::new(true, conn_store),
+                SimplePktFilter::new(cfg, conn_store, true),
                 "root->ns",
             )
         })
@@ -62,13 +75,15 @@ fn main() -> Result<()> {
         let event = event.clone();
         let (root_tun, ns_tun) = (root_tun.clone(), ns_tun.clone());
         let conn_store = conn_store.clone();
+        let cfg = cfg.clone();
+
         thread::spawn(move || {
             forward_and_filter(
                 running,
                 event,
                 ns_tun,
                 root_tun,
-                SimplePktFilter::new(false, conn_store),
+                SimplePktFilter::new(cfg, conn_store, false),
                 "ns->root",
             )
         })
