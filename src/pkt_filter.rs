@@ -35,6 +35,7 @@ pub struct ConnRecord {
     i: usize, // Packet counter -  with data
     tcp: TcpState,
     tls: bool, // Is tls detected
+    traiter: bool,
 }
 
 struct ConnId<'a> {
@@ -106,17 +107,17 @@ impl SimplePktFilter {
             reverse_dir,
 
             conns: conn_store,
-            traiters: Vec::from(["youtube".to_string()]),
+            traiters: Vec::from(["youtube".to_string(), "google.com".to_string()]),
         }
     }
 
-    fn check_traiters(&self, suspect: &str) -> Result<()> {
+    fn find_traiters(&self, suspect: &str) -> Option<&str> {
         for s in self.traiters.iter() {
             if suspect.contains(s) {
-                bail!("found {s}");
+                return Some(s);
             }
         }
-        Ok(())
+        None
     }
 
     fn filter_tls_handshake_clienthello(&self, pkt: &[u8], conn: &mut ConnRecord) -> Result<()> {
@@ -163,7 +164,7 @@ impl SimplePktFilter {
             let t = usize::from(u16::from_be_bytes([pkt[i], pkt[i + 1]]));
             let len = usize::from(u16::from_be_bytes([pkt[i + 2], pkt[i + 3]]));
 
-            println!("looking extension: {t}");
+            // println!("looking extension: {t}");
 
             i += 4;
 
@@ -181,7 +182,11 @@ impl SimplePktFilter {
                     return Ok(());
                 };
                 if self.cfg.sni {
-                    self.check_traiters(host)?;
+                    if let Some(host) = self.find_traiters(host) {
+                        conn.traiter = true;
+
+                        bail!("found traiter host: {host}");
+                    };
                 }
                 println!("SNI HOST: {host}");
             }
@@ -225,7 +230,7 @@ impl SimplePktFilter {
     }
 
     fn filter_app(&self, pkt: &[u8], conn: &mut ConnRecord) -> Result<()> {
-        println!("APP...");
+        // println!("APP...");
         if conn.i == 0 {
             println!("Looking for tls");
             // Look for ClientHello
@@ -282,7 +287,7 @@ impl SimplePktFilter {
     }
 
     fn filter_tcp<'a>(&self, pkt: &'a [u8], mut id: ConnId<'a>) -> Result<()> {
-        println!("-----");
+        // println!("-----");
         let hlen = usize::from(pkt[12] >> 4) * 4;
         let ack = (pkt[13] & 0x10) != 0;
         let syn = (pkt[13] & 0x02) != 0;
@@ -296,13 +301,21 @@ impl SimplePktFilter {
         let mut conns = self.conns.lock().map_err(|_| anyhow!("lock poisoned"))?;
         let mut conn = match conns.get(&id) {
             Some(c) => c.clone(),
-            None => ConnRecord {
-                id: id,
-                i: 0,
-                tcp: TcpState::Empty,
-                tls: false,
-            },
+            None => {
+                println!("New TLS conn {id}");
+                ConnRecord {
+                    id: id,
+                    i: 0,
+                    tcp: TcpState::Empty,
+                    tls: false,
+                    traiter: false,
+                }
+            }
         };
+
+        if conn.traiter {
+            bail!("traiter");
+        }
 
         // Resolve tcp state
         conn.tcp = match conn.tcp {
@@ -327,14 +340,15 @@ impl SimplePktFilter {
 
         // Send it to tls check there is payload
 
+        let mut res: Result<()> = Ok(());
+
         if pkt.len() - hlen > 0 {
-            self.filter_app(&pkt[hlen..], &mut conn)?;
+            res = self.filter_app(&pkt[hlen..], &mut conn);
             conn.i += 1;
         }
 
         conns.insert(id, conn);
-        println!("-----");
-        Ok(())
+        res
     }
 
     fn filter_udp(&self, pkt: &[u8]) -> Result<()> {
@@ -356,7 +370,9 @@ impl SimplePktFilter {
         }
         if let Some(addr) = self.try_get_dns(&pkt[DNS_HEADER_SIZE..]) {
             if self.cfg.dns {
-                self.check_traiters(&addr)?;
+                if let Some(host) = self.find_traiters(&addr) {
+                    bail!("found traiter host: {host}");
+                };
             }
             println!("DNS: {addr}");
         }
